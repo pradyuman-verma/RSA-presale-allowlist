@@ -112,37 +112,40 @@ contract Rsa {
         // no need to update pointer as all memory written here can be overwriten with no consequence
         assembly {
             /**
-             * @dev No need to update free memory pointer as all memory written here
-             *      can be overwriten with no consequence.
-             *
+             * @dev We can use memory right from 0x00
              * @dev Store in memory, length of BASE(signature), EXPONENT, MODULUS.
              */
-            mstore(0x80, sig.length)
-            mstore(add(0x80, 0x20), 0x20)
-            mstore(add(0x80, 0x40), sig.length)
+
+            mstore(0x00, sig.length)
+            mstore(0x20, 0x20)
+            mstore(0x40, sig.length)
 
             // Store in memory, BASE(signature), EXPONENT, MODULUS(public key).
-            calldatacopy(0xe0, sig.offset, sig.length)
-            mstore(add(0xe0, sig.length), EXPONENT)
+            calldatacopy(0x60, sig.offset, sig.length)
+            mstore(add(0x60, sig.length), EXPONENT)
 
             /**
              * @dev Calculate where in memory to copy modulus to (modPos). This must
              *      be dynamically determined as various size of signature may be used.
              */
-            let modPos := add(0xe0, add(sig.length, 0x20))
-
             /**
              * @dev 0x33 is a precalulated value that is the offset of where the
              *      signature begins in the metamorphic bytecode.
              */
-            extcodecopy(_metamorphicContractAddress, modPos, 0x33, sig.length)
+            extcodecopy(
+                _metamorphicContractAddress,
+                add(0x80, sig.length), // modPos
+                0x33,
+                sig.length
+            )
 
             /**
              * @dev callDataSize must be dynamically calculated. It follows the
              *      previously mentioned memory layout including the length and
              *      value of the sig, exponent and modulus.
              */
-            let callDataSize := add(0x80, mul(sig.length, 2))
+            // callDataSize := 32 + 32 + 32 + sig.length + 32 + sig.length = 128 + 2*sig.length
+            // or we can use msize() to get the current memory size
 
             /**
              * @dev Call 0x05 precompile (modular exponentation) w/ the following
@@ -157,31 +160,37 @@ contract Rsa {
              *      size of return data
              */
             if iszero(
-                staticcall(gas(), 0x05, 0x80, callDataSize, 0x80, sig.length)
+                staticcall(gas(), 0x05, 0x00, msize(), 0x00, sig.length)
             ) {
                 revert(0, 0)
             }
-
 
             /**
              * @dev Check all leading 32-byte chunk to ensure values are zeroed out.
              *      If a valid sig then only the last 20 bytes will contains non-zero bits.
              */
-            let chunksToCheck := div(sig.length, 0x20)
-            for { let i := 1 } lt(i, chunksToCheck) { i := add(i, 1) }
-            {
-                if  mload(add(0x60, mul(i, 0x20)))
-                {
+            // For 896 Bits: chunksToCheck = 28 => i < 28 => i : [0, 27] => 28 mload
+            // For 960 Bits: chunksToCheck = 30 => i < 30 => i : [0, 29] => 30 mload
+            // For 1024 Bits: chunksToCheck = 32 => i < 32 => i : [0, 31] => 32 mload
+            // For 2048 Bits: chunksToCheck = 64 => i < 64 => i : [0, 61] => 62 mload
+            // now instead of checking each slots, we check every next 2nd slot!
+            let chunksToCheck := sub(shr(0x05, returndatasize()), 1)
+            for {
+                let i
+            } lt(i, chunksToCheck) {
+                i := add(i, 2) // as each chunksToCheck is a multiple of two
+            } {
+                if mload(mul(i, 0x20)) {
                     revert(0, 0)
-                }   
+                }
             }
 
             /**
              * @dev Decoded signature will always be contained in last 32-bytes.
              *      If msg.sender == decoded signature then return true, else false.
              */
-            let decodedSig := mload(add(0x60, sig.length))
-            if eq(caller(), decodedSig) {
+            // let decodedSig := mload(add(0x60, sig.length))
+            if eq(caller(), mload(sub(returndatasize(), 0x20))) {
                 // Return true
                 mstore(0x00, 0x01)
                 return(0x00, 0x20)
